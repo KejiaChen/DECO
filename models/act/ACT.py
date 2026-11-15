@@ -29,6 +29,7 @@ class ACT(nn.Module):
             num_encoder_layers: int = 4,
             num_decoder_layers: int = 1,
             action_dim: int = 28, 
+            num_cameras: int = 2,
             ):
         # BERT style VAE encoder with input tokens [cls, robot_state, *action_sequence].
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
@@ -39,6 +40,7 @@ class ACT(nn.Module):
         self.chunk_size = chunk_size
         self.dim_model = dim_model
         self.use_vae = use_vae
+        self.num_cameras = num_cameras
         
         if self.use_vae:
             num_input_token_encoder = 1 + chunk_size
@@ -171,27 +173,17 @@ class ACT(nn.Module):
         if self.obs_state:
             obs_state_in_tokens = self.transformer_obs_encoder(obs).unsqueeze(1)  # (b, 1, D)
 
-        feat1 = self.backbone(img1)["feature_map"]  # (b, 512, h, w)
-        feat2 = self.backbone(img2)["feature_map"]
-        feat1_pos_embed = self.encoder_cam_feat_pos_embed(feat1).to(dtype=feat1.dtype)
-        feat2_pos_embed = self.encoder_cam_feat_pos_embed(feat2).to(dtype=feat2.dtype)
+        image_features, image_positions = [], []
+        for image in (img1, img2)[:self.num_cameras]:
+            feat = self.backbone(image)["feature_map"]
+            pos_embed = self.encoder_cam_feat_pos_embed(feat).to(dtype=feat.dtype)
+            feat = self.encoder_img_feat_input_proj(feat)
+            image_features.append(einops.rearrange(feat, "b c h w -> b (h w) c"))
+            pos_embed = einops.rearrange(pos_embed, "b c h w -> b (h w) c")
+            image_positions.append(pos_embed.repeat(batch_size, 1, 1))
 
-        
-        feat1 = self.encoder_img_feat_input_proj(feat1)
-        feat2 = self.encoder_img_feat_input_proj(feat2)
-
-
-        # Rearrange features to (sequence, batch, dim).
-        feat1 = einops.rearrange(feat1, "b c h w -> b (h w) c")  #  (b, seq_len, D)
-        feat2 = einops.rearrange(feat2, "b c h w -> b (h w) c")  #  (b, seq_len, D)
-        feat_input = torch.cat([feat1, feat2], axis=1) # (b, 2*seq_len, D)
-
-        feat1_pos_embed = einops.rearrange(feat1_pos_embed, "b c h w -> b (h w) c")
-        feat1_pos_embed = feat1_pos_embed.repeat(batch_size, 1, 1)
-        feat2_pos_embed = einops.rearrange(feat2_pos_embed, "b c h w -> b (h w) c")
-        feat2_pos_embed = feat2_pos_embed.repeat(batch_size, 1, 1)
-
-        pos_embed_input = torch.cat([feat1_pos_embed, feat2_pos_embed], axis=1)
+        feat_input = torch.cat(image_features, dim=1)
+        pos_embed_input = torch.cat(image_positions, dim=1)
         # Stack all tokens along the sequence dimension.
         encoder_in_tokens = torch.cat([encoder_in_tokens, feat_input], axis=1)
 
@@ -461,7 +453,7 @@ def get_activation_fn(activation: str) -> Callable:
         return F.glu
     raise RuntimeError(f"activation should be relu/gelu/glu, not {activation}.")
 
-def modeling(action_dim, chunk_size, obs_state, use_task_condition=False, num_tasks=0, use_vae=True, num_vae_encoder_layers=4, num_encoder_layers=4, num_decoder_layers=1, pretrain_model_path=False):
+def modeling(action_dim, chunk_size, obs_state, use_task_condition=False, num_tasks=0, use_vae=True, num_vae_encoder_layers=4, num_encoder_layers=4, num_decoder_layers=1, pretrain_model_path=False, num_cameras=2):
     act = ACT(
             chunk_size=chunk_size, 
             obs_state=obs_state, 
@@ -471,7 +463,8 @@ def modeling(action_dim, chunk_size, obs_state, use_task_condition=False, num_ta
             num_vae_encoder_layers=num_vae_encoder_layers, 
             num_encoder_layers=num_encoder_layers, 
             num_decoder_layers=num_decoder_layers, 
-            action_dim=action_dim
+            action_dim=action_dim,
+            num_cameras=num_cameras,
         )
     if pretrain_model_path:
         print("loading pretrained weights from {}".format(pretrain_model_path))

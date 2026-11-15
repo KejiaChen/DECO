@@ -10,7 +10,7 @@ from models.deco.rope import apply_rotary_emb, RotaryPosEmbed
 
 
 class DECO(nn.Module):
-    def __init__(self, act_dim, chunk_size, obs_state=True, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, img_pretrain=False, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256], freeze_backbone=True):
+    def __init__(self, act_dim, chunk_size, obs_state=True, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, img_pretrain=False, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=[256, 256], freeze_backbone=True, num_cameras=2):
         super().__init__()
         head_dim = dim // heads
         self.head_dim = head_dim
@@ -20,11 +20,12 @@ class DECO(nn.Module):
         self.use_tactile = use_tactile
         self.use_task_condition = use_task_condition
         self.inference_step = inf_step
+        self.num_cameras = num_cameras
         self.rope = RotaryPosEmbed(head_dim, rope_axes_dim)  # initial mrope embedding
         self.img_encoder = ResNet34()  # img encoder: resnet from ImageNet pretrained model
         self.img_head = nn.Conv2d(512, dim, kernel_size=3, padding=1)
         
-        self.pos_idx_embedd = nn.Embedding(2, dim) # img embedding to distinguish img1 and img2
+        self.pos_idx_embedd = nn.Embedding(num_cameras, dim)  # distinguish camera views
         if self.obs_state:
             self.obs_encoder = nn.Sequential(
                 nn.Linear(act_dim, dim),
@@ -97,7 +98,7 @@ class DECO(nn.Module):
             training: bool
         """
         # image encoding 
-        feat, image_rotary_emb = self.img_encoding(img1, img2) # feat:[B, 2*img_seq_len, dim]
+        feat, image_rotary_emb = self.img_encoding(img1, img2) # feat:[B, num_cameras*img_seq_len, dim]
         if self.use_tactile:
             # calculate the mean tactile data of each regions(17 regions in inspire hand) in forward pass
             tac1_avg = torch.stack([tac1[:, s:e].mean(dim=1) for s, e in self.tactile_data_index.values()], dim=1)  # (batch, 17)
@@ -148,23 +149,18 @@ class DECO(nn.Module):
             return sample
 
     def img_encoding(self, img1, img2):
-        assert img1.shape == img2.shape, "img1 and img2 must have the same shape"
-        img = torch.cat([img1, img2], dim=0)  # concat img1 and img2 in batch dim
+        images = (img1, img2)[:self.num_cameras]
+        img = torch.cat(images, dim=0)  # encode camera views in one batch
         feat = self.img_encoder(img)
         feat = self.img_head(feat)
-        feat1, feat2 = feat.chunk(2, dim=0)
 
-        # get rope freqs
-        feat_h, feat_w = feat1.shape[-2:]
-        image_rotary_emb = self.rope(feat_h, feat_w)
+        # Each camera uses the same spatial coordinates.
+        feat_h, feat_w = feat.shape[-2:]
+        image_rotary_emb = tuple(freqs.repeat(self.num_cameras, 1) for freqs in self.rope(feat_h, feat_w))
 
-        # add img_id embedding
-        feat1 = einops.rearrange(feat1, 'b c h w -> b (h w) c')
-        feat2 = einops.rearrange(feat2, 'b c h w -> b (h w) c')
-        img_id = torch.tensor([0]*feat1.shape[1] + [1]*feat2.shape[1]).to(img2.device)   # diff img_id for img1 and img2
-        img_id = self.pos_idx_embedd(img_id).repeat(img1.shape[0], 1, 1)
-        feat = torch.cat([feat1, feat2], dim=1)  # (b, 2*seq_len, dim)
-        feat = feat + img_id
+        feat = einops.rearrange(feat, '(n b) c h w -> b (n h w) c', n=self.num_cameras)
+        img_id = torch.arange(self.num_cameras, device=feat.device).repeat_interleave(feat_h * feat_w)
+        feat = feat + self.pos_idx_embedd(img_id).unsqueeze(0)
 
         return feat, image_rotary_emb
 
@@ -305,7 +301,7 @@ class MMAttention(nn.Module):
     def forward(self, img, act, t, image_rotary_emb, tactile=None):
         """
         Args:
-            img: [B, 2*img_len, dim]
+            img: [B, num_cameras*img_len, dim]
             act: [B, chunk, dim]
             t: [B, dim]
             image_rotary_emb: tuple[Tensor, Tensor]
@@ -322,10 +318,8 @@ class MMAttention(nn.Module):
         img_q, img_k, img_v = einops.rearrange(img_qkv, "B L (K H D) -> K B H L D", K=3, H=self.head, D=self.head_dim)
         img_q, img_k = self.img_qknorm(img_q, img_k, img_v)  # qk norm
         # q,k,v: [B, H, l1, D]
-        feat_len = int(total_img_len / 2)
-        # apply rotary embedding twice for qk in diff img features
-        img_q[:, :, :feat_len, :], img_k[:, :, :feat_len, :] = apply_rotary_emb(img_q[:, :, :feat_len, :], image_rotary_emb), apply_rotary_emb(img_k[:, :, :feat_len, :], image_rotary_emb)
-        img_q[:, :, feat_len:, :], img_k[:, :, feat_len:, :] = apply_rotary_emb(img_q[:, :, feat_len:, :], image_rotary_emb), apply_rotary_emb(img_k[:, :, feat_len:, :], image_rotary_emb)
+        img_q = apply_rotary_emb(img_q, image_rotary_emb)
+        img_k = apply_rotary_emb(img_k, image_rotary_emb)
         
 
         scale1_act, shift1_act, gate1_act, scale2_act, shift2_act, gate2_act = self.act_bais(t) # adaLN
@@ -428,7 +422,7 @@ class timeEmb(nn.Module):
         return emb
     
 
-def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), img_pretrain=None, freeze_backbone=True, pretrain_model_path=False, adapter_model_path=False):
+def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False, plugin_rank=32, use_task_condition=False, num_tasks=10, inf_step=10, num_attn_blocks=6, heads=8, dim=512, rope_axes_dim=(256, 256), img_pretrain=None, freeze_backbone=True, pretrain_model_path=False, adapter_model_path=False, num_cameras=2):
     # def get_trainable_state_dict(model):
     #     return {
     #         name: param.detach().cpu()
@@ -450,7 +444,8 @@ def modeling(action_dim, chunk_size, obs_state, use_tactile=False, plugin=False,
             dim=dim,
             rope_axes_dim=rope_axes_dim,
             img_pretrain=img_pretrain,
-            freeze_backbone=freeze_backbone
+            freeze_backbone=freeze_backbone,
+            num_cameras=num_cameras,
         )
     
     if pretrain_model_path:  # load pretrained weights for finetuning or inference

@@ -30,7 +30,8 @@ class DiffusionModel(nn.Module):
             train_step=100,
             infer_step=100,
             beta_schedule="squaredcos_cap_v2",
-            replace_groupnorm_backbone=False
+            replace_groupnorm_backbone=False,
+            num_cameras=2,
             ):
         super().__init__()
 
@@ -42,8 +43,9 @@ class DiffusionModel(nn.Module):
         self.obs_state = obs_state
         self.use_task_condition = use_task_condition
         self.use_tactile = use_tactile
+        self.num_cameras = num_cameras
         self.rgb_encoder = ImageEncoder(img_size=img_size, spatial_kps=spatial_keypoints, replace_groupnorm_backbone=replace_groupnorm_backbone)
-        global_cond_dim = spatial_keypoints * 4 
+        global_cond_dim = self.rgb_encoder.feature_dim * num_cameras
 
         if self.use_task_condition:
             self.task_encoder = nn.Embedding(num_tasks, time_dim)
@@ -76,9 +78,9 @@ class DiffusionModel(nn.Module):
             )
     
     def forward(self, img1, img2, obs=None, act=None, task_idx=None, tac1=None, tac2=None, action_mask=None, training=True):
-        rgb_feat1 = self.rgb_encoder(img1)  # b, spatial_keypoints*2
-        rgb_feat2 = self.rgb_encoder(img2)  # b, spatial_keypoints*2
-        condition = torch.cat([rgb_feat1, rgb_feat2], dim=-1)
+        images = (img1, img2)[:self.num_cameras]
+        rgb_features = [self.rgb_encoder(image) for image in images]
+        condition = torch.cat(rgb_features, dim=-1)
 
         if self.obs_state:
             condition = torch.cat([obs, condition], dim=-1)
@@ -411,7 +413,8 @@ def modeling(
     infer_step=10, 
     beta_schedule="squaredcos_cap_v2", 
     replace_groupnorm_backbone=False,
-    pretrain_model_path=None):
+    pretrain_model_path=None,
+    num_cameras=2):
 
     dp = DiffusionModel(
             act_dim=action_dim,
@@ -430,7 +433,8 @@ def modeling(
             train_step=train_step,
             infer_step=infer_step,
             beta_schedule=beta_schedule,
-            replace_groupnorm_backbone=replace_groupnorm_backbone
+            replace_groupnorm_backbone=replace_groupnorm_backbone,
+            num_cameras=num_cameras,
         )
     if pretrain_model_path:
         print("loading pretrained weights from {}".format(pretrain_model_path))

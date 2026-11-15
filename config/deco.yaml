@@ -1,5 +1,6 @@
 model_name: deco
 model:
+  num_cameras: 2
   action_dim: 28
   chunk_size: 32
   obs_state: True
