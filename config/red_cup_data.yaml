@@ -1,0 +1,23 @@
+# Shared data settings for the ACT, DP and DECO configurations added in step 3.
+data:
+  format: lerobot_v21
+  cache_dir: .cache/datasets/red_cup
+  image_key: observation.images.fisheye_img
+  split_seed: 42
+  train_ratio: 0.9
+  chunk_size: 32
+  norm_type: mean_std
+  reader:
+    codebase_version: v2.1
+    image_shape: [240, 240, 3]  # Source image: height, width, RGB channels.
+    state_shape: [10]
+    action_shape: [10]
+    timestamp_tolerance: {atol: 0.0001, rtol: 0.0}
+    std_ddof: 0
+    std_epsilon: 0.00000001
+    max_cached_episodes: 4
+
+img:
+  img_size: [256, 256]
+  img_mean: [0.485, 0.456, 0.406]
+  img_std: [0.229, 0.224, 0.225]

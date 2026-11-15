@@ -11,7 +11,7 @@ import torch.distributed as dist
 import matplotlib
 matplotlib.use('Agg')
 from matplotlib import pyplot as plt
-from dataset import my_Dataset, letterbox
+from dataset import build_dataset, letterbox
 from torchvision.transforms import v2 as transforms
 try:
     from torch.optim.lr_scheduler import _LRScheduler
@@ -178,8 +178,8 @@ def main(opt):
             mean=img_mean, 
             std=img_std)
         ])
-    train_dataset = my_Dataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
-    test_dataset = my_Dataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
+    train_dataset = build_dataset(data_dir=opt.data, train=True, transform=train_transform, **config['data'])
+    test_dataset = build_dataset(data_dir=opt.data, train=False, transform=test_transform, **config['data'])
 
     if opt.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset, shuffle=True)

@@ -1,0 +1,6 @@
+.venv/
+.local-tools/
+.cache/
+__pycache__/
+*.py[cod]
+logs/

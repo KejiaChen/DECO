@@ -144,6 +144,17 @@ class my_Dataset(Dataset):
         np.random.seed(seed)
         torch.manual_seed(seed)
 
+def build_dataset(data_dir, train=True, transform=None, **args):
+    """Select the legacy reader by default, or the local LeRobot v2.1 reader."""
+    data_format = args.pop('format', 'legacy')
+    if data_format == 'legacy':
+        return my_Dataset(data_dir=data_dir, train=train, transform=transform, **args)
+    if data_format == 'lerobot_v21':
+        from lerobot_dataset import LeRobotV21Dataset
+        return LeRobotV21Dataset(data_dir=data_dir, train=train, transform=transform, **args)
+    raise ValueError(f'Unknown dataset format: {data_format}')
+
+
 if __name__ == "__main__":
     import yaml
     config = yaml.safe_load(open('./IL_training_codebase/config/act.yaml', 'r'))
